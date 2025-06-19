@@ -4,23 +4,68 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const axios = require('axios'); // to verify captcha
+const Otp = require("../models/Otp");
+const sendSMS = require("../utils/sendSMS");
 
-// Admin Signup (no change)
-router.post('/signup', async (req, res) => {
+// Request OTP route
+router.post('/request-otp', async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email is required' });
 
-    const existing = await User.findOne({ email });
-    if (existing) return res.status(400).json({ error: 'Email already exists' });
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
 
-    const hashed = await bcrypt.hash(password, 10);
+    await Otp.deleteMany({ email });
 
-    const user = new User({ name, email, passwordHash: hashed, role });
-    await user.save();
+    await Otp.create({
+      email,
+      otp: otpCode,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000), // valid for 5 minutes
+    });
 
-    res.status(201).json({ message: 'Admin registered successfully' });
+    const message = `OTP for admin signup (${email}): ${otpCode}`;
+
+    // Wrap sendSMS in try/catch to avoid crashing if SMS fails
+    try {
+      await sendSMS(process.env.ADMIN_PHONE, message);
+    } catch (smsErr) {
+      console.error("Failed to send SMS:", smsErr);
+      // You may choose to proceed or fail here based on your app logic
+    }
+
+    res.json({ message: 'OTP sent to admin. Contact admin to get OTP.' });
   } catch (err) {
-    res.status(500).json({ error: 'Signup failed' });
+    console.error("Request OTP error:", err);
+    res.status(500).json({ error: 'OTP request failed' });
+  }
+});
+
+// Signup route
+router.post("/signup", async (req, res) => {
+  try {
+    const { name, email, password, role, otp } = req.body;
+    if (!name || !email || !password || !role || !otp) {
+      return res.status(400).json({ error: "All fields including OTP are required" });
+    }
+
+    const existingUser = await User.findOne({ email });
+    if (existingUser) return res.status(400).json({ error: "Email already exists" });
+
+    const validOtp = await Otp.findOne({ email, otp });
+    if (!validOtp || validOtp.expiresAt.getTime() < Date.now()) {
+      return res.status(400).json({ error: "Invalid or expired OTP" });
+    }
+
+    await Otp.deleteMany({ email });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const newUser = new User({ name, email, passwordHash: hashedPassword, role });
+    await newUser.save();
+
+    res.status(201).json({ message: "Admin registered successfully" });
+  } catch (err) {
+    console.error("Signup error:", err);
+    res.status(500).json({ error: "Signup failed" });
   }
 });
 
